@@ -20,6 +20,7 @@
 #include "mango/manage/monitor.h"
 #include "mango/manage/tab.h"
 #include "mango/switcher/switcher.h"
+#include "mango/workspace_overview/workspace_overview.h"
 #include <scenefx/types/wlr_scene.h>
 #include <wlr/backend/libinput.h>
 #include <wlr/types/wlr_cursor.h>
@@ -213,6 +214,29 @@ void pointer_check_confine_client(void) {
 void pointer_client_destroyed(Client *c) {
 	if (confine_pointer_last == c) {
 		confine_pointer_last = NULL;
+	}
+}
+
+void pointer_client_replaced(Client *old, Client *new) {
+	if (!old || !new || old == new)
+		return;
+
+	if (server.grab_client == old)
+		server.grab_client = new;
+
+	if (server.drop_client == old) {
+		bool draw = old->enable_drop_area_draw;
+		old->enable_drop_area_draw = false;
+		new->enable_drop_area_draw = draw;
+		server.drop_client = new;
+	}
+
+	if (server.group_bar_drag_client == old)
+		server.group_bar_drag_client = new;
+
+	if (server.group_bar_hover && server.group_bar_hover == old->group_bar) {
+		mango_bar_decoration_set_close_hover(server.group_bar_hover, false);
+		server.group_bar_hover = NULL;
 	}
 }
 
@@ -1173,6 +1197,21 @@ static Client *group_bar_target_at(double x, double y, Client *ignore) {
 void pointer_process_motion(uint32_t time, struct wlr_input_device *device,
 							double dx, double dy, double dx_unaccel,
 							double dy_unaccel) {
+	if (workspace_overview_is_active()) {
+		if (time) {
+			wlr_relative_pointer_manager_v1_send_relative_motion(
+				server.relative_pointer_manager, server.seat,
+				(uint64_t)time * 1000, dx, dy, dx_unaccel, dy_unaccel);
+			wlr_cursor_move(server.cursor, device, dx, dy);
+			pointer_cursor_activity();
+			wlr_idle_notifier_v1_notify_activity(server.idle_notifier,
+												 server.seat);
+			workspace_overview_handle_motion(server.cursor->x,
+											 server.cursor->y);
+		}
+		return;
+	}
+
 	double sx = 0, sy = 0, sx_confined, sy_confined;
 	Client *c = NULL, *w = NULL;
 	Client *closet_drop_client = NULL;
@@ -1736,6 +1775,9 @@ bool pointer_process_button_press(struct wlr_pointer_button_event *event) {
 	switch (event->state) {
 	case WL_POINTER_BUTTON_STATE_PRESSED:
 		server.cursor_mode = CurPressed;
+		if (!server.session_locked && workspace_overview_is_active())
+			return workspace_overview_handle_button(event);
+
 		set_selected_monitor(
 			monitor_at_point(server.cursor->x, server.cursor->y));
 		if (server.session_locked)
@@ -1862,6 +1904,9 @@ bool pointer_process_button_press(struct wlr_pointer_button_event *event) {
 		}
 		break;
 	case WL_POINTER_BUTTON_STATE_RELEASED:
+		if (!server.session_locked && workspace_overview_is_active())
+			return workspace_overview_handle_button(event);
+
 		server.group_bar_drag_pending = false;
 		server.drop_to_group = false;
 		server.group_bar_drag_client = NULL;
